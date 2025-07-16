@@ -1,0 +1,66 @@
+# Parameters – customize these for your environment
+$SwitchName      = "SET-vSwitch"
+$PhysicalNICs    = @("NIC1","NIC2")  # update to your actual NIC names
+$VLANs = @{
+    Management   = 10
+    SMB          = 20
+    LiveMigration= 30
+    Heartbeat    = 40
+}
+$LogFile = "C:\Scripts\SET-Create_$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+
+function Log {
+    param($msg)
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    "$timestamp`t$msg" | Tee-Object -FilePath $LogFile -Append
+}
+
+try {
+    Log "=== Script started ==="
+
+    # 1. Create SET switch
+    if (-not (Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue)) {
+        Log "Creating SET vSwitch '$SwitchName' on NICs: $($PhysicalNICs -join ', ')"
+        New-VMSwitch -Name $SwitchName `
+                     -NetAdapterName $PhysicalNICs `
+                     -EnableEmbeddedTeaming $true `
+                     -AllowManagementOS $false `
+                     -ErrorAction Stop
+        Log "vSwitch created."
+    } else {
+        Log "vSwitch '$SwitchName' already exists."
+    }
+
+    # 2. For each VLAN, create/rename a vNIC on the management OS
+    foreach ($name in $VLANs.Keys) {
+        $vnicName = "vNIC-$name"
+        $vlanId = $VLANs[$name]
+        try {
+            # Add vNIC if missing
+            if (-not (Get-VMNetworkAdapter -ManagementOS -Name $vnicName -ErrorAction SilentlyContinue)) {
+                Log "Adding vNIC '$vnicName' to vSwitch '$SwitchName'"
+                Add-VMNetworkAdapter -ManagementOS -Name $vnicName -SwitchName $SwitchName -ErrorAction Stop
+                Log "vNIC '$vnicName' created."
+            } else {
+                Log "vNIC '$vnicName' already exists."
+            }
+
+            # Configure VLAN tagging
+            Log "Configuring VLAN $vlanId on vNIC '$vnicName'"
+            Set-VMNetworkAdapterVlan -ManagementOS `
+                                     -VMNetworkAdapterName $vnicName `
+                                     -Access -VlanId $vlanId -ErrorAction Stop
+            Log "VLAN $vlanId set on '$vnicName'."
+
+        } catch {
+            Log "ERROR configuring vNIC '$vnicName': $_"
+            throw
+        }
+    }
+
+    Log "=== All VLAN vNICs configured successfully ==="
+} catch {
+    Log "=== SCRIPT FAILED: $_ ==="
+    Write-Error "Check log file at $LogFile for more details."
+    exit 1
+}
