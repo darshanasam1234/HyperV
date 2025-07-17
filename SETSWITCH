@@ -1,66 +1,37 @@
-# Parameters – customize these for your environment
-$SwitchName      = "SET-vSwitch"
-$PhysicalNICs    = @("NIC1","NIC2")  # update to your actual NIC names
-$VLANs = @{
-    Management   = 10
-    SMB          = 20
-    LiveMigration= 30
-    Heartbeat    = 40
+# Rename Physical NICs
+$adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Sort-Object Name | Select-Object -First 2
+Rename-NetAdapter -Name $adapters[0].Name -NewName "NIC_01"
+Rename-NetAdapter -Name $adapters[1].Name -NewName "NIC_02"
+
+# Create SET Switch
+$setSwitchName = "SETSwitch"
+New-VMSwitch -Name $setSwitchName -NetAdapterName "NIC_01","NIC_02" -EnableEmbeddedTeaming $true -AllowManagementOS $false
+
+# Define Virtual NICs and VLANs
+$vmNics = @(
+    @{ Name = "Management"; VLAN = 600 },
+    @{ Name = "SMB1"; VLAN = 601 },
+    @{ Name = "SMB2"; VLAN = 602 },
+    @{ Name = "HB"; VLAN = 603 },
+    @{ Name = "LM"; VLAN = 604 }
+)
+
+# Create Virtual NICs
+foreach ($nic in $vmNics) {
+    Add-VMNetworkAdapter -ManagementOS -Name $nic.Name -SwitchName $setSwitchName
+    Set-VMNetworkAdapterVlan -ManagementOS -VMNetworkAdapterName $nic.Name -Access -VlanId $nic.VLAN
 }
-$LogFile = "C:\Scripts\SET-Create_$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 
-function Log {
-    param($msg)
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    "$timestamp`t$msg" | Tee-Object -FilePath $LogFile -Append
-}
+# Prompt for IP addresses
+foreach ($nic in $vmNics) {
+    $ip = Read-Host "Enter IP address for $($nic.Name)"
+    $prefix = Read-Host "Enter subnet prefix length for $($nic.Name) (e.g., 24 for 255.255.255.0)"
 
-try {
-    Log "=== Script started ==="
-
-    # 1. Create SET switch
-    if (-not (Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue)) {
-        Log "Creating SET vSwitch '$SwitchName' on NICs: $($PhysicalNICs -join ', ')"
-        New-VMSwitch -Name $SwitchName `
-                     -NetAdapterName $PhysicalNICs `
-                     -EnableEmbeddedTeaming $true `
-                     -AllowManagementOS $false `
-                     -ErrorAction Stop
-        Log "vSwitch created."
+    $gateway = $null
+    if ($nic.Name -eq "Management") {
+        $gateway = Read-Host "Enter default gateway for $($nic.Name)"
+        New-NetIPAddress -InterfaceAlias $nic.Name -IPAddress $ip -PrefixLength $prefix -DefaultGateway $gateway
     } else {
-        Log "vSwitch '$SwitchName' already exists."
+        New-NetIPAddress -InterfaceAlias $nic.Name -IPAddress $ip -PrefixLength $prefix
     }
-
-    # 2. For each VLAN, create/rename a vNIC on the management OS
-    foreach ($name in $VLANs.Keys) {
-        $vnicName = "vNIC-$name"
-        $vlanId = $VLANs[$name]
-        try {
-            # Add vNIC if missing
-            if (-not (Get-VMNetworkAdapter -ManagementOS -Name $vnicName -ErrorAction SilentlyContinue)) {
-                Log "Adding vNIC '$vnicName' to vSwitch '$SwitchName'"
-                Add-VMNetworkAdapter -ManagementOS -Name $vnicName -SwitchName $SwitchName -ErrorAction Stop
-                Log "vNIC '$vnicName' created."
-            } else {
-                Log "vNIC '$vnicName' already exists."
-            }
-
-            # Configure VLAN tagging
-            Log "Configuring VLAN $vlanId on vNIC '$vnicName'"
-            Set-VMNetworkAdapterVlan -ManagementOS `
-                                     -VMNetworkAdapterName $vnicName `
-                                     -Access -VlanId $vlanId -ErrorAction Stop
-            Log "VLAN $vlanId set on '$vnicName'."
-
-        } catch {
-            Log "ERROR configuring vNIC '$vnicName': $_"
-            throw
-        }
-    }
-
-    Log "=== All VLAN vNICs configured successfully ==="
-} catch {
-    Log "=== SCRIPT FAILED: $_ ==="
-    Write-Error "Check log file at $LogFile for more details."
-    exit 1
 }
